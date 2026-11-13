@@ -1,5 +1,6 @@
 ﻿
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using TatumWelcome2.DTOs;
@@ -142,6 +143,15 @@ public sealed class BillPurchaseService
                 reference);
         }
 
+        // NEW: A reference conflict must not be retried.
+        if (status == "ReferenceConflict")
+        {
+            return new BillPurchaseResult(
+                TransactionResult.PaymentFailed,
+                false,
+                reference);
+        }
+
         if (status != "Pending")
         {
             return new BillPurchaseResult(
@@ -163,7 +173,35 @@ public sealed class BillPurchaseService
                     bankAUrl,
                     request);
 
-            // An uncertain response remains pending.
+            // NEW: Handle a payment reference conflict.
+            if (httpResponse.StatusCode == HttpStatusCode.Conflict)
+            {
+                BillPaymentResponseDto? conflictResponse =
+                    await httpResponse.Content
+                        .ReadFromJsonAsync<BillPaymentResponseDto>(
+                            cancellationToken: cancellationToken);
+
+                if (conflictResponse?.Reference == reference &&
+                    conflictResponse.Message ==
+                        "Payment reference already used for another request.")
+                {
+                    bool marked =
+                        _repository.MarkReferenceConflict(reference);
+
+                    if (marked)
+                    {
+                        return new BillPurchaseResult(
+                            TransactionResult.PaymentFailed,
+                            false,
+                            reference);
+                    }
+                }
+
+                // Unrecognized conflict: retain Pending.
+                return Pending(reference);
+            }
+
+            // Other uncertain responses remain pending.
             if (!httpResponse.IsSuccessStatusCode)
             {
                 return Pending(reference);
@@ -180,7 +218,7 @@ public sealed class BillPurchaseService
                 return Pending(reference);
             }
 
-            // Success: finalize the reserved deduction.
+            // Success: finalize reserved deduction.
             // Failure: refund the reserved amount.
             bool completed =
                 _repository.CompletePayment(

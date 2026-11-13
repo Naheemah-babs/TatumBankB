@@ -127,7 +127,18 @@ public class BillPaymentsController : ControllerBase
                 Message = "Payment is being reconciled."
             });
         }
-
+        if (_paymentRepository.PaymentBelongsToAccount(
+        result.Reference, accountNumber) &&
+    _paymentRepository.GetPaymentStatus(result.Reference)
+        == "ReferenceConflict")
+        {
+            return Conflict(new
+            {
+                result.Reference,
+                Status = "ReferenceConflict",
+                Message = "Payment reference conflicts with an existing transaction."
+            });
+        }  
         if (result.Result != TransactionResult.Success)
         {
             return BadRequest(new

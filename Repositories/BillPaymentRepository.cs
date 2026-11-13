@@ -37,8 +37,7 @@ public sealed class BillPaymentRepository
 
         try
         {
-            // Lock the account first. Requests from the same
-            // account cannot reserve funds simultaneously.
+            // Lock the account first.
             AccountBalanceRow? account =
                 connection.QuerySingleOrDefault<AccountBalanceRow>(
                     """
@@ -56,7 +55,7 @@ public sealed class BillPaymentRepository
                 return TransactionResult.AccountNotFound;
             }
 
-            // Check the reference while holding the account lock.
+            // Check whether this reference already exists.
             PaymentRow? previous =
                 connection.QuerySingleOrDefault<PaymentRow>(
                     """
@@ -89,7 +88,8 @@ public sealed class BillPaymentRepository
 
                 transaction.Commit();
 
-                return previous.Status == "Failed"
+                return previous.Status == "Failed" ||
+                       previous.Status == "ReferenceConflict"
                     ? TransactionResult.PaymentFailed
                     : TransactionResult.Success;
             }
@@ -106,7 +106,7 @@ public sealed class BillPaymentRepository
                 return TransactionResult.InsufficientFunds;
             }
 
-            // Reserve the reference before deducting money.
+            // Reserve the reference before deducting.
             connection.Execute(
                 """
                 INSERT INTO OutgoingBillPayments
@@ -150,8 +150,6 @@ public sealed class BillPaymentRepository
         }
         catch (MySqlException ex) when (ex.Number == 1062)
         {
-            // Another account may have used the same reference.
-            // Roll back the entire reservation.
             transaction.Rollback();
             return TransactionResult.PaymentFailed;
         }
@@ -188,7 +186,7 @@ public sealed class BillPaymentRepository
                 return false;
             }
 
-            // Never apply a completed payment twice.
+            // Never complete the same payment twice.
             if (payment.Status != "Pending")
             {
                 transaction.Commit();
@@ -199,8 +197,8 @@ public sealed class BillPaymentRepository
 
             if (success)
             {
-                // Money was already reserved.
-                // Only record the completed transaction.
+                // The amount was already deducted.
+                // Record the successful transaction.
                 connection.Execute(
                     """
                     INSERT INTO Transactions
@@ -223,8 +221,7 @@ public sealed class BillPaymentRepository
             }
             else
             {
-                // Bank A rejected the payment.
-                // Release the reserved money once.
+                // Refund a genuinely failed payment.
                 connection.Execute(
                     """
                     UPDATE Accounts
@@ -260,6 +257,24 @@ public sealed class BillPaymentRepository
             transaction.Rollback();
             throw;
         }
+    }
+
+    // NEW: Stop retrying a payment with a reference conflict.
+    // Do not deduct or refund any money here.
+    public bool MarkReferenceConflict(string reference)
+    {
+        using var connection = _factory.CreateConnection();
+
+        int updated = connection.Execute(
+            """
+            UPDATE OutgoingBillPayments
+            SET Status = 'ReferenceConflict'
+            WHERE Reference = @Reference
+              AND Status = 'Pending';
+            """,
+            new { Reference = reference });
+
+        return updated == 1;
     }
 
     public string? GetPaymentStatus(string reference)
@@ -311,18 +326,18 @@ public sealed class BillPaymentRepository
     }
 
     public bool PaymentBelongsToAccount(
-    string reference,
-    string accountNumber)
+        string reference,
+        string accountNumber)
     {
         using var connection = _factory.CreateConnection();
 
         return connection.ExecuteScalar<int>(
             """
-        SELECT COUNT(*)
-        FROM OutgoingBillPayments
-        WHERE Reference = @Reference
-          AND AccountNumber = @AccountNumber;
-        """,
+            SELECT COUNT(*)
+            FROM OutgoingBillPayments
+            WHERE Reference = @Reference
+              AND AccountNumber = @AccountNumber;
+            """,
             new
             {
                 Reference = reference,
