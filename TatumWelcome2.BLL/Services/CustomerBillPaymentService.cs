@@ -46,6 +46,12 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         if (!TryResolveReference(request.Reference, out string reference))
             return Task.FromResult(InvalidReference(request.Reference, request.Amount));
 
+        // Clean the number once, here, so the stored and sent value is always 11 digits.
+        string? phoneError = InputValidator.ValidatePhone(request.PhoneNumber, out string phone);
+
+        if (phoneError != null)
+            return Task.FromResult(Invalid(reference, phoneError, request.Amount));
+
         BillPaymentRequest bill = new()
         {
             Reference = reference,
@@ -53,14 +59,14 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
             AccountNumber = accountNumber,
             PaymentType = BillPaymentTypes.Airtime,
             Network = request.Network,
-            PhoneNumber = request.PhoneNumber,
+            PhoneNumber = phone,
             Amount = request.Amount
         };
 
         return PurchaseAsync(
             bill,
             request.Pin,
-            TransactionDescriptions.Airtime(request.Network, request.PhoneNumber, reference));
+            TransactionDescriptions.Airtime(request.Network, phone, reference));
     }
 
     public Task<BillPurchaseResult> BuyDataAsync(
@@ -72,6 +78,11 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
 
         if (!TryResolveReference(request.Reference, out string reference))
             return Task.FromResult(InvalidReference(request.Reference, 0m));
+
+        string? phoneError = InputValidator.ValidatePhone(request.PhoneNumber, out string phone);
+
+        if (phoneError != null)
+            return Task.FromResult(Invalid(reference, phoneError, 0m));
 
         DataPlan? plan = DataPlans.DataPlanItems.FirstOrDefault(
             item => string.Equals(
@@ -89,7 +100,7 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
             AccountNumber = accountNumber,
             PaymentType = BillPaymentTypes.Data,
             Network = request.Network,
-            PhoneNumber = request.PhoneNumber,
+            PhoneNumber = phone,
             Amount = plan.Price,
             DataPlanName = plan.Name
         };
@@ -97,7 +108,61 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         return PurchaseAsync(
             bill,
             request.Pin,
-            TransactionDescriptions.Data(request.Network, plan.Name, request.PhoneNumber, reference));
+            TransactionDescriptions.Data(request.Network, plan.Name, phone, reference));
+    }
+
+    public async Task ReconcilePendingAsync(CancellationToken cancellationToken)
+    {
+        List<OutgoingBillPaymentRecord> pending = _repository.GetPending();
+
+        if (pending.Count == 0)
+            return;
+
+        if (string.IsNullOrWhiteSpace(_interbankOptions.Url))
+        {
+            throw new InvalidOperationException(
+                $"{InterBankOptions.SectionName}:Url is not configured.");
+        }
+
+        foreach (OutgoingBillPaymentRecord payment in pending)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                BillPaymentRequest bill = new()
+                {
+                    Reference = payment.Reference,
+                    BankId = payment.BankId,
+                    AccountNumber = payment.AccountNumber,
+                    PaymentType = payment.PaymentType,
+                    Network = payment.Network,
+                    PhoneNumber = payment.PhoneNumber,
+                    Amount = payment.Amount,
+                    DataPlanName = payment.DataPlanName
+                };
+
+                // Same call and same reply mapping as a live purchase.
+                BillPurchaseResult result = await SendToProviderAsync(bill);
+
+                _logger.LogInformation(
+                    "Bill payment {Reference} reconciled: {Outcome}",
+                    payment.Reference,
+                    result.Outcome);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Bill payment reconciliation failed: {Reference}",
+                    payment.Reference);
+            }
+        }
     }
 
     private async Task<BillPurchaseResult> PurchaseAsync(
@@ -202,60 +267,6 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         {
             _logger.LogWarning(ex, "Unsupported reply for bill payment {Reference}", bill.Reference);
             return Pending(bill);
-        }
-    }
-
-    public async Task ReconcilePendingAsync(CancellationToken cancellationToken)
-    {
-        List<OutgoingBillPaymentRecord> pending = _repository.GetPending();
-
-        if (pending.Count == 0)
-            return;
-
-        if (string.IsNullOrWhiteSpace(_interbankOptions.Url))
-        {
-            throw new InvalidOperationException(
-                $"{InterBankOptions.SectionName}:Url is not configured.");
-        }
-
-        foreach (OutgoingBillPaymentRecord payment in pending)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                BillPaymentRequest bill = new()
-                {
-                    Reference = payment.Reference,
-                    BankId = payment.BankId,
-                    AccountNumber = payment.AccountNumber,
-                    PaymentType = payment.PaymentType,
-                    Network = payment.Network,
-                    PhoneNumber = payment.PhoneNumber,
-                    Amount = payment.Amount,
-                    DataPlanName = payment.DataPlanName
-                };
-
-                // Same call and same reply mapping as a live purchase.
-                BillPurchaseResult result = await SendToProviderAsync(bill);
-
-                _logger.LogInformation(
-                    "Bill payment {Reference} reconciled: {Outcome}",
-                    payment.Reference,
-                    result.Outcome);
-            }
-            catch (OperationCanceledException)
-                when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Bill payment reconciliation failed: {Reference}",
-                    payment.Reference);
-            }
         }
     }
 

@@ -3,10 +3,7 @@ using TatumWelcome2.Domain.Models;
 
 namespace TatumWelcome2.BLL.Services;
 
-/// <summary>
-/// Rules for a bill payment request, shared by the provider endpoint
-/// (POST /bills/pay) and customer airtime/data purchases.
-/// </summary>
+/// <summary>Rules for a bill payment request before it is debited or sent to Bank A.</summary>
 public static class BillPaymentValidator
 {
     public const decimal MaximumAmount = AccountLimits.MaximumBalance;
@@ -44,12 +41,14 @@ public static class BillPaymentValidator
             return "Invalid network provider.";
         }
 
-        if (request.PhoneNumber == null ||
-            request.PhoneNumber.Length != 11 ||
-            !request.PhoneNumber.All(char.IsDigit))
-        {
-            return "Invalid phone number.";
-        }
+        string? phoneError = InputValidator.ValidatePhone(request.PhoneNumber, out string phone);
+
+        if (phoneError != null)
+            return phoneError;
+
+        // Requests must already carry the canonical 11-digit form.
+        if (phone != request.PhoneNumber)
+            return "Phone number must be in the 11-digit format, e.g. 08012345678.";
 
         if (request.Amount <= 0 ||
             request.Amount > MaximumAmount ||
