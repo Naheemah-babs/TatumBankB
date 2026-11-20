@@ -1,5 +1,5 @@
 ﻿using Dapper;
-using MySqlConnector;
+using Microsoft.Data.SqlClient;
 using TatumWelcome2.BLL.IServices;
 using TatumWelcome2.BLL.Services;
 using TatumWelcome2.Domain.Interfaces;
@@ -10,7 +10,7 @@ namespace TatumWelcome2.Infrastructure.Repositories;
 
 /// <summary>
 /// Accounts and their ledger. Money-moving methods lock the affected rows
-/// (SELECT ... FOR UPDATE) and apply only the checks that must hold under that lock: PIN
+/// (UPDLOCK) and apply only the checks that must hold under that lock: PIN
 /// against the stored hash, frozen status, available funds and the balance
 /// cap. Input validation, references and descriptions come from the caller.
 /// </summary>
@@ -144,14 +144,14 @@ public sealed class AccountRepository : IAccountRepository
 
             return AccountCreationResult.Success;
         }
-        catch (MySqlException ex)
-            when (MySqlErrors.IsUniqueViolation(ex, "UQ_Accounts_Phone"))
+        catch (SqlException ex)
+            when (SqlServerErrors.IsUniqueViolation(ex, "UQ_Accounts_Phone"))
         {
             transaction.Rollback();
             return AccountCreationResult.DuplicatePhone;
         }
-        catch (MySqlException ex)
-            when (MySqlErrors.IsUniqueViolation(ex, "PRIMARY"))
+        catch (SqlException ex)
+            when (SqlServerErrors.IsUniqueViolation(ex, "PK_Accounts"))
         {
             transaction.Rollback();
             return AccountCreationResult.DuplicateAccountNumber;
@@ -279,28 +279,17 @@ public sealed class AccountRepository : IAccountRepository
 
         try
         {
-            // Both rows locked in key order to avoid deadlocks between
-            // opposite-direction transfers.
-            List<LockedAccountRow> rows = connection.Query<LockedAccountRow>(
-                """
-                SELECT AccountNumber, Name, PinHash, Balance, IsFrozen
-                FROM Accounts
-                WHERE AccountNumber IN (@SenderNumber, @RecipientNumber)
-                ORDER BY AccountNumber
-                FOR UPDATE;
-                """,
-                new
-                {
-                    SenderNumber = senderNumber,
-                    RecipientNumber = recipientNumber
-                },
-                transaction).ToList();
+            // Always lock the lower account number first, so opposite transfers
+            // (A->B and B->A) queue up on the same row instead of deadlocking.
+            bool senderFirst = string.CompareOrdinal(senderNumber, recipientNumber) <= 0;
+            string firstNumber = senderFirst ? senderNumber : recipientNumber;
+            string secondNumber = senderFirst ? recipientNumber : senderNumber;
 
-            LockedAccountRow? sender = rows.FirstOrDefault(
-                row => row.AccountNumber == senderNumber);
+            LockedAccountRow? first = LockAccount(connection, transaction, firstNumber);
+            LockedAccountRow? second = LockAccount(connection, transaction, secondNumber);
 
-            LockedAccountRow? recipient = rows.FirstOrDefault(
-                row => row.AccountNumber == recipientNumber);
+            LockedAccountRow? sender = senderFirst ? first : second;
+            LockedAccountRow? recipient = senderFirst ? second : first;
 
             if (sender == null)
                 return Abort(transaction, TransactionResult.AccountNotFound);
@@ -418,6 +407,7 @@ public sealed class AccountRepository : IAccountRepository
 
         return updated == 1;
     }
+
     public PinAttemptOutcome VerifyPinWithLockout(string accountNumber, string pin)
     {
         using var connection = _connectionFactory.CreateConnection();
@@ -432,12 +422,11 @@ public sealed class AccountRepository : IAccountRepository
                 """
                 SELECT PinHash,
                        CASE WHEN LockedUntil IS NOT NULL
-                                 AND LockedUntil > UTC_TIMESTAMP()
-                            THEN TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), LockedUntil)
+                                 AND LockedUntil > SYSUTCDATETIME()
+                            THEN DATEDIFF(SECOND, SYSUTCDATETIME(), LockedUntil)
                             ELSE 0 END AS LockSecondsRemaining
-                FROM Accounts
-                WHERE AccountNumber = @AccountNumber
-                FOR UPDATE;
+                FROM Accounts WITH (UPDLOCK, ROWLOCK)
+                WHERE AccountNumber = @AccountNumber;
                 """,
                 new { AccountNumber = accountNumber },
                 transaction);
@@ -493,8 +482,8 @@ public sealed class AccountRepository : IAccountRepository
         return connection.QuerySingleOrDefault<int>(
             """
             SELECT CASE WHEN LockedUntil IS NOT NULL
-                             AND LockedUntil > UTC_TIMESTAMP()
-                        THEN TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), LockedUntil)
+                             AND LockedUntil > SYSUTCDATETIME()
+                        THEN DATEDIFF(SECOND, SYSUTCDATETIME(), LockedUntil)
                         ELSE 0 END
             FROM Accounts
             WHERE AccountNumber = @AccountNumber;
@@ -504,20 +493,20 @@ public sealed class AccountRepository : IAccountRepository
 
     /// <summary>Counts a wrong PIN (restarting after 24 quiet hours) and locks on every 5th.</summary>
     private static void RecordFailedPin(
-        MySqlConnection connection,
-        MySqlTransaction transaction,
+        SqlConnection connection,
+        SqlTransaction transaction,
         string accountNumber)
     {
-        // MySQL applies SET left to right, so the first line still sees the old LastFailedPinAt.
+        // SQL Server evaluates every SET expression against the old row.
         connection.Execute(
             """
             UPDATE Accounts
             SET FailedPinAttempts =
-                    IF(LastFailedPinAt IS NULL
-                       OR LastFailedPinAt < UTC_TIMESTAMP() - INTERVAL @ResetHours HOUR,
-                       1,
-                       FailedPinAttempts + 1),
-                LastFailedPinAt = UTC_TIMESTAMP()
+                    IIF(LastFailedPinAt IS NULL
+                        OR LastFailedPinAt < DATEADD(HOUR, -@ResetHours, SYSUTCDATETIME()),
+                        1,
+                        FailedPinAttempts + 1),
+                LastFailedPinAt = SYSUTCDATETIME()
             WHERE AccountNumber = @AccountNumber;
             """,
             new
@@ -544,7 +533,7 @@ public sealed class AccountRepository : IAccountRepository
         connection.Execute(
             """
             UPDATE Accounts
-            SET LockedUntil = DATE_ADD(UTC_TIMESTAMP(), INTERVAL @Seconds SECOND)
+            SET LockedUntil = DATEADD(SECOND, @Seconds, SYSUTCDATETIME())
             WHERE AccountNumber = @AccountNumber;
             """,
             new { AccountNumber = accountNumber, Seconds = lockSeconds.Value },
@@ -552,24 +541,23 @@ public sealed class AccountRepository : IAccountRepository
     }
 
     private static LockedAccountRow? LockAccount(
-        MySqlConnection connection,
-        MySqlTransaction transaction,
+        SqlConnection connection,
+        SqlTransaction transaction,
         string accountNumber)
     {
         return connection.QuerySingleOrDefault<LockedAccountRow>(
             """
             SELECT AccountNumber, Name, PinHash, Balance, IsFrozen
-            FROM Accounts
-            WHERE AccountNumber = @AccountNumber
-            FOR UPDATE;
+            FROM Accounts WITH (UPDLOCK, ROWLOCK)
+            WHERE AccountNumber = @AccountNumber;
             """,
             new { AccountNumber = accountNumber },
             transaction);
     }
 
     private static void InsertTransaction(
-        MySqlConnection connection,
-        MySqlTransaction transaction,
+        SqlConnection connection,
+        SqlTransaction transaction,
         string accountNumber,
         TransactionType type,
         decimal amount,
@@ -592,7 +580,7 @@ public sealed class AccountRepository : IAccountRepository
     }
 
     private static TransactionResult Abort(
-        MySqlTransaction transaction,
+        SqlTransaction transaction,
         TransactionResult result)
     {
         transaction.Rollback();
@@ -627,6 +615,7 @@ public sealed class AccountRepository : IAccountRepository
         public string Description { get; set; } = "";
         public string? Reference { get; set; }
     }
+
     private sealed class PinStateRow
     {
         public string PinHash { get; set; } = "";

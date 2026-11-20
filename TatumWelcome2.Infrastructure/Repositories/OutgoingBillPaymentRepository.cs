@@ -1,5 +1,5 @@
 ﻿using Dapper;
-using MySqlConnector;
+using Microsoft.Data.SqlClient;
 using TatumWelcome2.BLL.DTOs;
 using TatumWelcome2.BLL.IServices;
 using TatumWelcome2.Domain.Interfaces;
@@ -16,6 +16,14 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
                Status, CreatedAt
         FROM OutgoingBillPayments
         WHERE Reference = @Reference
+        """;
+
+    private const string SelectPaymentForUpdateSql = """
+        SELECT Reference, AccountNumber, BankId, PaymentType, Network,
+               PhoneNumber, Amount, DataPlanName, Description,
+               Status, CreatedAt
+        FROM OutgoingBillPayments WITH (UPDLOCK, ROWLOCK)
+        WHERE Reference = @Reference;
         """;
 
     private readonly IDbConnectionFactory _factory;
@@ -44,9 +52,8 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
             AccountRow? account = connection.QuerySingleOrDefault<AccountRow>(
                 """
                 SELECT PinHash, Balance, IsFrozen
-                FROM Accounts
-                WHERE AccountNumber = @AccountNumber
-                FOR UPDATE;
+                FROM Accounts WITH (UPDLOCK, ROWLOCK)
+                WHERE AccountNumber = @AccountNumber;
                 """,
                 new { request.AccountNumber },
                 transaction);
@@ -115,7 +122,7 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
             transaction.Commit();
             return new OutgoingReservation(OutgoingReservationStatus.Reserved);
         }
-        catch (MySqlException ex) when (MySqlErrors.IsUniqueViolation(ex))
+        catch (SqlException ex) when (SqlServerErrors.IsUniqueViolation(ex))
         {
             // Same reference taken by another account at the same moment.
             transaction.Rollback();
@@ -142,7 +149,7 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
         {
             OutgoingBillPaymentRecord? payment =
                 connection.QuerySingleOrDefault<OutgoingBillPaymentRecord>(
-                    SelectPaymentSql + "\nFOR UPDATE;",
+                    SelectPaymentForUpdateSql,
                     new { Reference = reference },
                     transaction);
 
@@ -193,9 +200,8 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
                 decimal balance = connection.QuerySingle<decimal>(
                     """
                     SELECT Balance
-                    FROM Accounts
-                    WHERE AccountNumber = @AccountNumber
-                    FOR UPDATE;
+                    FROM Accounts WITH (UPDLOCK, ROWLOCK)
+                    WHERE AccountNumber = @AccountNumber;
                     """,
                     new { payment.AccountNumber },
                     transaction);
@@ -283,7 +289,7 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
     }
 
     private static OutgoingReservation Reject(
-        MySqlTransaction transaction,
+        SqlTransaction transaction,
         TransactionResult reason)
     {
         transaction.Rollback();

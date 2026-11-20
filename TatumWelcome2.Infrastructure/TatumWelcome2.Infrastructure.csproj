@@ -4,13 +4,14 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <UserSecretsId>c63943da-4a73-4a5c-b1ad-3c1a746ec0a4</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.89" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.2" />
     <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="6.0.1" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="11.0.0" />
-    <PackageReference Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>
 
   <ItemGroup>

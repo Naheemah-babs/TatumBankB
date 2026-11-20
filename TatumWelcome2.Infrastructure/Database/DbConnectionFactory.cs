@@ -1,6 +1,6 @@
 ﻿
 using Microsoft.Extensions.Configuration;
-using MySqlConnector;
+using Microsoft.Data.SqlClient;
 
 namespace TatumWelcome2.Infrastructure.Database;
 
@@ -12,11 +12,11 @@ public class DbConnectionFactory : IDbConnectionFactory
     {
         _connectionString = configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException(
-                "MySQL connection string is missing.");
+                "SQL connection string is missing.");
     }
 
-    public MySqlConnection CreateConnection()
+    public SqlConnection CreateConnection()
     {
-        return new MySqlConnection(_connectionString);
+        return new SqlConnection(_connectionString);
     }
 }
