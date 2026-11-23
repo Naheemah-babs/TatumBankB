@@ -50,12 +50,14 @@ public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransfe
         // Trim once so "123 " is validated, stored and compared as "123".
         string recipient = request.RecipientAccountNumber.Trim();
 
-        if (recipient.Length > AccountLimits.MaximumAccountNumberLength)
+        if (recipient.Length != AccountLimits.MaximumAccountNumberLength)
         {
             return Task.FromResult(InvalidRequest(
                 reference,
-                $"Recipient account number must not be more than {AccountLimits.MaximumAccountNumberLength} characters."));
+                $"Recipient account number must be exactly {AccountLimits.MaximumAccountNumberLength} characters."));
         }
+        if (!recipient.All(char.IsAsciiDigit))
+            return Task.FromResult(InvalidRequest(reference, "Recipient account number must contain digits only."));
 
         // Same amount rules as an intrabank transfer: whole number, at least 500.
         if (AccountLimits.CheckAmount(request.Amount) is { } amountError)
