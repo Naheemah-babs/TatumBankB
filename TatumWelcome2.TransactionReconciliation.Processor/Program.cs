@@ -24,7 +24,6 @@ builder.Services.Configure<ReconciliationOptions>(
 
 // Register the loop itself. The host starts it and stops it on Ctrl+C.
 builder.Services.AddHostedService<ReconciliationWorker>();
-builder.Services.AddHostedService<ReconciliationWorker>();
 builder.Services.AddHostedService<BillPaymentReconciliationWorker>();
 
 await builder.Build().RunAsync();
