@@ -29,19 +29,26 @@ namespace TatumWelcome2.BLL.DTOs
         /// Debited, but the outcome at the provider is unknown (timeout or network
         /// error). The Processor will settle it. No further debit on retry.
         /// </summary>
-        Pending
+        Pending,
+
+        /// <summary>
+        /// Wrong-PIN lockout is active; nothing was debited.
+        /// See <see cref="BillPurchaseResult.RetryAfterSeconds"/>.
+        /// </summary>
+        AccountLocked
     }
-    
+
     /// <param name="Replayed">
     /// True when this reference was already processed: the stored outcome is
     /// returned and no further debit is made.
     /// </param>
-    
+    /// <param name="RetryAfterSeconds">Seconds until the lock ends (AccountLocked only).</param>
     public sealed record BillPurchaseResult(
         BillPurchaseOutcome Outcome,
         string Reference,
         string Message,
         decimal Amount,
         TransactionResult? FailureReason = null,
-        bool Replayed = false);
+        bool Replayed = false,
+        int? RetryAfterSeconds = null);
 }

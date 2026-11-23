@@ -23,6 +23,8 @@ namespace TatumWelcome2.BLL.DTOs
     DuplicateReference,
 
     InvalidRequest,
+    /// <summary>Wrong-PIN lockout is active; see <see cref="InterbankSendResult.RetryAfterSeconds"/>.</summary>
+    AccountLocked,
 
     /// <summary>Debit was refused; see <see cref="InterbankSendResult.FailureReason"/>.</summary>
     Failed
@@ -32,5 +34,6 @@ public sealed record InterbankSendResult(
     InterbankSendOutcome Outcome,
     string Reference,
     string Message,
-    TransactionResult? FailureReason = null);
+    TransactionResult? FailureReason = null,
+    int? RetryAfterSeconds = null);
 }

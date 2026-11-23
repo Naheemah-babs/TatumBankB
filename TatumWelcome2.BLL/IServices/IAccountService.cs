@@ -9,6 +9,7 @@ public interface IAccountService
 
     /// <summary>Name lookup for other banks. Null when not found.</summary>
     AccountLookupDto? LookupAccount(string accountNumber);
+    int GetPinLockSecondsRemaining(string accountNumber);
 
     BalanceResponseDto? GetBalance(string accountNumber);
 

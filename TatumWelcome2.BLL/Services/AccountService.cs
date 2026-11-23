@@ -93,7 +93,22 @@ public sealed class AccountService : IAccountService
             IsFrozen = account.IsFrozen
         };
     }
+    public int GetPinLockSecondsRemaining(string accountNumber) =>
+    _repository.GetLockSecondsRemaining(accountNumber);
 
+    /// <summary>
+    /// Checks the PIN through the same lockout counter the login uses:
+    /// wrong PINs are counted, and every 5th one locks the account.
+    /// Returns null when the PIN is correct and the account is not locked.
+    /// </summary>
+    private TransactionResult? CheckPinWithLockout(string accountNumber, string pin) =>
+        _repository.VerifyPinWithLockout(accountNumber, pin) switch
+        {
+            PinAttemptOutcome.Verified => null,
+            PinAttemptOutcome.Locked => TransactionResult.AccountLocked,
+            PinAttemptOutcome.WrongPin => TransactionResult.InvalidPin,
+            _ => TransactionResult.AccountNotFound
+        };
     public TransactionHistoryResponseDto? GetTransactionHistory(
         string accountNumber)
     {
@@ -132,9 +147,9 @@ public sealed class AccountService : IAccountService
     }
 
     public TransactionResult Withdraw(
-        string accountNumber,
-        decimal amount,
-        string pin)
+    string accountNumber,
+    decimal amount,
+    string pin)
     {
         if (string.IsNullOrWhiteSpace(pin))
             return TransactionResult.PinRequired;
@@ -142,7 +157,11 @@ public sealed class AccountService : IAccountService
         if (CheckAmount(amount) is { } amountError)
             return amountError;
 
-        // The PIN is verified against the locked row inside the repository.
+        // Amount mistakes are reported first, so they never count as wrong PINs.
+        if (CheckPinWithLockout(accountNumber, pin) is { } pinError)
+            return pinError;
+
+        // The repository checks the PIN again against the locked row.
         return _repository.Withdraw(
             accountNumber,
             amount,
@@ -172,6 +191,10 @@ public sealed class AccountService : IAccountService
         if (CheckAmount(amount) is { } amountError)
             return amountError;
 
+        if (CheckPinWithLockout(senderNumber, pin) is { } pinError)
+            return pinError;
+
+        // The repository checks the PIN again against the locked row.
         return _repository.Transfer(
             senderNumber,
             recipient,
@@ -184,23 +207,7 @@ public sealed class AccountService : IAccountService
     /// Returns why the amount is rejected, or null when it is acceptable.
     /// The whole-number check runs first so 0.01 gets the "whole number" message.
     /// </summary>
-    private static TransactionResult? CheckAmount(decimal amount)
-    {
-        if (!IsWholeNumber(amount))
-            return TransactionResult.AmountNotWholeNumber;
-
-        if (!IsWithinRange(amount))
-            return TransactionResult.AmountOutOfRange;
-
-        return null;
-    }
-
-    /// <summary>True when the amount has no decimal part (500 and 500.00 pass, 500.50 fails).</summary>
-    private static bool IsWholeNumber(decimal amount) =>
-        decimal.Truncate(amount) == amount;
-
-    /// <summary>At least the minimum and within the balance cap.</summary>
-    private static bool IsWithinRange(decimal amount) =>
-        amount >= 500 &&
-        amount <= AccountLimits.MaximumBalance;
+    /// <summary>Returns why the amount is rejected, or null when it is acceptable.</summary>
+    private static TransactionResult? CheckAmount(decimal amount) =>
+        AccountLimits.CheckAmount(amount);
 }

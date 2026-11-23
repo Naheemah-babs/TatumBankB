@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using TatumWelcome2.BLL.DTOs;
 using TatumWelcome2.Domain.Models;
 
@@ -28,6 +29,14 @@ namespace TatumWelcome2.API.Mapping
                 InterbankSendOutcome.ReferenceMismatch or
                 InterbankSendOutcome.DuplicateReference =>
                     new ConflictObjectResult(body),
+
+                // Same message and status as a locked login, withdraw or transfer.
+                InterbankSendOutcome.AccountLocked =>
+                    new ObjectResult(ApiResponse.Message(
+                        AuthResponses.LockedMessage(result.RetryAfterSeconds ?? 0)))
+                    {
+                        StatusCode = StatusCodes.Status429TooManyRequests
+                    },
 
                 InterbankSendOutcome.Failed
                     when result.FailureReason == TransactionResult.AccountNotFound =>
@@ -69,5 +78,4 @@ namespace TatumWelcome2.API.Mapping
                 ? new NotFoundObjectResult("No transfer outcome found for this reference.")
                 : new OkObjectResult(outcome);
     }
-
 }

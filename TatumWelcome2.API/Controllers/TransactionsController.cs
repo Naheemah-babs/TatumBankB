@@ -40,7 +40,7 @@ public class TransactionsController : ControllerBase
     [HttpPost("withdraw")]
     [EnableRateLimiting("pin-transactions")]
     public IActionResult Withdraw(
-        [FromBody] WithdrawRequestDto request)
+    [FromBody] WithdrawRequestDto request)
     {
         string? accountNumber = User.GetAccountNumber();
 
@@ -52,7 +52,11 @@ public class TransactionsController : ControllerBase
             request.Amount,
             request.Pin);
 
-        return TransactionResponses.Withdraw(result, request.Amount);
+        int lockSeconds = result == TransactionResult.AccountLocked
+            ? _accountService.GetPinLockSecondsRemaining(accountNumber)
+            : 0;
+
+        return TransactionResponses.Withdraw(result, request.Amount, lockSeconds);
     }
 
     [HttpPost("transfers")]
@@ -71,9 +75,14 @@ public class TransactionsController : ControllerBase
             request.Amount,
             request.Pin);
 
+        int lockSeconds = result == TransactionResult.AccountLocked
+            ? _accountService.GetPinLockSecondsRemaining(senderNumber)
+            : 0;
+
         return TransactionResponses.Transfer(
             result,
             request.RecipientAccountNumber,
-            request.Amount);
+            request.Amount,
+            lockSeconds);
     }
-}
+};

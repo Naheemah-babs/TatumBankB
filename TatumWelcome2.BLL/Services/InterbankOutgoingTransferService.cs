@@ -12,6 +12,7 @@ namespace TatumWelcome2.BLL.Services;
 
 public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransferService
 {
+    private readonly IAccountRepository _accounts;
     private readonly IBankApiClient _bankApiClient;
     private readonly IInterbankOutgoingTransferRepository _repository;
     private readonly ILogger<InterbankOutgoingTransferService> _logger;
@@ -20,18 +21,20 @@ public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransfe
     public InterbankOutgoingTransferService(
         IBankApiClient bankApiClient,
         IInterbankOutgoingTransferRepository repository,
+        IAccountRepository accounts,
         ILogger<InterbankOutgoingTransferService> logger,
         IOptions<InterBankOptions> interbankOptions)
     {
         _bankApiClient = bankApiClient;
         _repository = repository;
+        _accounts = accounts;
         _logger = logger;
         _interbankOptions = interbankOptions.Value;
     }
 
     public Task<InterbankSendResult> SendTransferAsync(
-        string senderNumber,
-        SendInterbankTransferRequestDto request)
+    string senderNumber,
+    SendInterbankTransferRequestDto request)
     {
         string reference = request.Reference?.Trim() ?? string.Empty;
 
@@ -44,8 +47,25 @@ public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransfe
         if (string.IsNullOrWhiteSpace(request.RecipientAccountNumber))
             return Task.FromResult(InvalidRequest(reference, "Recipient account number is required."));
 
-        if (request.Amount <= 0)
-            return Task.FromResult(InvalidRequest(reference, "Amount must be greater than zero."));
+        // Trim once so "123 " is validated, stored and compared as "123".
+        string recipient = request.RecipientAccountNumber.Trim();
+
+        if (recipient.Length > AccountLimits.MaximumAccountNumberLength)
+        {
+            return Task.FromResult(InvalidRequest(
+                reference,
+                $"Recipient account number must not be more than {AccountLimits.MaximumAccountNumberLength} characters."));
+        }
+
+        // Same amount rules as an intrabank transfer: whole number, at least 500.
+        if (AccountLimits.CheckAmount(request.Amount) is { } amountError)
+        {
+            string message = amountError == TransactionResult.AmountNotWholeNumber
+                ? AccountLimits.NotWholeNumberMessage
+                : AccountLimits.OutOfRangeMessage;
+
+            return Task.FromResult(InvalidRequest(reference, message));
+        }
 
         if (string.IsNullOrWhiteSpace(_interbankOptions.Url))
         {
@@ -56,7 +76,7 @@ public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransfe
         return SendTransferAsync(
             senderNumber,
             _interbankOptions.Url,
-            request.RecipientAccountNumber,
+            recipient,
             request.Amount,
             request.Pin,
             reference);
@@ -138,6 +158,35 @@ public sealed class InterbankOutgoingTransferService : IInterbankOutgoingTransfe
                 InterbankSendOutcome.Pending,
                 reference,
                 $"Transfer pending confirmation. Reference: {reference}. No additional debit made.");
+        }
+
+        PinAttemptOutcome pinAttempt = _accounts.VerifyPinWithLockout(senderNumber, pin);
+
+        if (pinAttempt == PinAttemptOutcome.Locked)
+        {
+            return new InterbankSendResult(
+                InterbankSendOutcome.AccountLocked,
+                reference,
+                "Account is temporarily locked.",
+                RetryAfterSeconds: _accounts.GetLockSecondsRemaining(senderNumber));
+        }
+
+        if (pinAttempt == PinAttemptOutcome.WrongPin)
+        {
+            return new InterbankSendResult(
+                InterbankSendOutcome.Failed,
+                reference,
+                $"Transfer failed: {TransactionResult.InvalidPin}",
+                TransactionResult.InvalidPin);
+        }
+
+        if (pinAttempt == PinAttemptOutcome.AccountNotFound)
+        {
+            return new InterbankSendResult(
+                InterbankSendOutcome.Failed,
+                reference,
+                $"Transfer failed: {TransactionResult.AccountNotFound}",
+                TransactionResult.AccountNotFound);
         }
 
         var request = new InterbankTransferRequestDto

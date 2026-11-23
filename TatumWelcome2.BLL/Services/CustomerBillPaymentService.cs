@@ -6,6 +6,7 @@ using System.Text.Json;
 using TatumWelcome2.BLL.DTOs;
 using TatumWelcome2.BLL.IServices;
 using TatumWelcome2.BLL.Options;
+using TatumWelcome2.Domain.Helper;
 using TatumWelcome2.Domain.Interfaces;
 using TatumWelcome2.Domain.Models;
 
@@ -20,17 +21,20 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         "Payment reference already used for another request.";
 
     private readonly IOutgoingBillPaymentRepository _repository;
+    private readonly IAccountRepository _accounts;
     private readonly IBankApiClient _bankApiClient;
     private readonly InterBankOptions _interbankOptions;
     private readonly ILogger<CustomerBillPaymentService> _logger;
 
     public CustomerBillPaymentService(
         IOutgoingBillPaymentRepository repository,
+        IAccountRepository accounts,
         IBankApiClient bankApiClient,
         IOptions<InterBankOptions> interbankOptions,
         ILogger<CustomerBillPaymentService> logger)
     {
         _repository = repository;
+        _accounts = accounts;
         _bankApiClient = bankApiClient;
         _interbankOptions = interbankOptions.Value;
         _logger = logger;
@@ -58,7 +62,7 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
             BankId = OwnBankId,
             AccountNumber = accountNumber,
             PaymentType = BillPaymentTypes.Airtime,
-            Network = request.Network,
+            Network = NetworkHelper.Normalize(request.Network),
             PhoneNumber = phone,
             Amount = request.Amount
         };
@@ -66,7 +70,7 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         return PurchaseAsync(
             bill,
             request.Pin,
-            TransactionDescriptions.Airtime(request.Network, phone, reference));
+            TransactionDescriptions.Airtime(bill.Network, phone, reference));
     }
 
     public Task<BillPurchaseResult> BuyDataAsync(
@@ -99,7 +103,7 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
             BankId = OwnBankId,
             AccountNumber = accountNumber,
             PaymentType = BillPaymentTypes.Data,
-            Network = request.Network,
+            Network = NetworkHelper.Normalize(request.Network),
             PhoneNumber = phone,
             Amount = plan.Price,
             DataPlanName = plan.Name
@@ -108,7 +112,7 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
         return PurchaseAsync(
             bill,
             request.Pin,
-            TransactionDescriptions.Data(request.Network, plan.Name, phone, reference));
+            TransactionDescriptions.Data(bill.Network, plan.Name, phone, reference));
     }
 
     public async Task ReconcilePendingAsync(CancellationToken cancellationToken)
@@ -182,7 +186,29 @@ public sealed class CustomerBillPaymentService : ICustomerBillPaymentService
                 $"{InterBankOptions.SectionName}:Url is not configured.");
         }
 
+        // Input mistakes are reported above, so they never count as wrong PINs.
+        PinAttemptOutcome pinAttempt =
+            _accounts.VerifyPinWithLockout(bill.AccountNumber, pin);
+
+        if (pinAttempt == PinAttemptOutcome.Locked)
+        {
+            return new BillPurchaseResult(
+                BillPurchaseOutcome.AccountLocked,
+                bill.Reference,
+                "Account is temporarily locked.",
+                bill.Amount,
+                TransactionResult.AccountLocked,
+                RetryAfterSeconds: _accounts.GetLockSecondsRemaining(bill.AccountNumber));
+        }
+
+        if (pinAttempt == PinAttemptOutcome.WrongPin)
+            return Rejected(bill, TransactionResult.InvalidPin);
+
+        if (pinAttempt == PinAttemptOutcome.AccountNotFound)
+            return Rejected(bill, TransactionResult.AccountNotFound);
+
         // Debit and Pending row commit together. No lock is held during the call to A.
+        // The repository checks the PIN again as the final guard.
         OutgoingReservation reservation = _repository.Reserve(bill, pin, description);
 
         return reservation.Status switch

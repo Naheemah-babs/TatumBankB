@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using System.Security.Claims;
@@ -16,7 +17,36 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("https://localhost:5001");
 
 // Register controller-based Web API services.
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .ConfigureApiBehaviorOptions(options =>
+    {
+        // Malformed or mistyped request bodies get the same shape as other validation errors.
+        options.InvalidModelStateResponseFactory = context =>
+        {
+            var errors = context.ModelState
+                .Where(entry => entry.Value?.Errors.Count > 0 && entry.Key != "request")
+                .Select(entry =>
+                {
+                    // JSON problems are keyed "$.field"; the raw parser text is noise.
+                    bool isJsonError = entry.Key.StartsWith("$.");
+
+                    return new
+                    {
+                        field = isJsonError ? entry.Key[2..] : entry.Key,
+                        message = isJsonError
+                            ? "Invalid value. Check the type and format (numbers must be valid JSON, e.g. 1000, not 01000)."
+                            : entry.Value!.Errors[0].ErrorMessage
+                    };
+                })
+                .ToList();
+
+            return new BadRequestObjectResult(new
+            {
+                message = "The request is invalid.",
+                errors
+            });
+        };
+    });
 
 // Read JWT settings from User Secrets.
 string jwtKey = builder.Configuration["Jwt:Key"]
@@ -68,6 +98,25 @@ builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode =
         StatusCodes.Status429TooManyRequests;
+
+    // Without this, a rate-limited request gets an empty 429 body.
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.StatusCode =
+            StatusCodes.Status429TooManyRequests;
+
+        int seconds = 60;
+
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan retryAfter))
+        {
+            seconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+            context.HttpContext.Response.Headers.RetryAfter = seconds.ToString();
+        }
+
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new { message = $"Too many requests. Please try again in {seconds} seconds." },
+            cancellationToken);
+    };
 
     // Limit login attempts per IP address.
     options.AddPolicy("login", context =>
@@ -165,13 +214,13 @@ builder.Services.AddSwaggerGen(options =>
         });
 });
 
-// Repositories, MySQL connection factory and bank-to-bank HTTP client.
+// Repositories, SQL Server connection factory and bank-to-bank HTTP client.
 builder.Services.AddTatumInfrastructure();
 
 // Business services (scoped) and stateless helpers.
 builder.Services.AddTatumBusinessLogic();
 
-// Partner bank for outgoing interbank transfers (Banks:BankB:Url).
+// Partner bank for outgoing interbank transfers (Banks:BankA:Url).
 builder.Services.Configure<InterBankOptions>(
     builder.Configuration.GetSection(InterBankOptions.SectionName));
 
@@ -236,4 +285,3 @@ app.MapControllers();
 
 // Start the Web API.
 app.Run();
-
