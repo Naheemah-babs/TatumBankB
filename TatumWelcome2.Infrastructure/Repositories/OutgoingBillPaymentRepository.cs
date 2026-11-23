@@ -2,6 +2,7 @@
 using Microsoft.Data.SqlClient;
 using TatumWelcome2.BLL.DTOs;
 using TatumWelcome2.BLL.IServices;
+using TatumWelcome2.Domain;
 using TatumWelcome2.Domain.Interfaces;
 using TatumWelcome2.Domain.Models;
 using TatumWelcome2.Infrastructure.Database;
@@ -189,7 +190,7 @@ public sealed class OutgoingBillPaymentRepository : IOutgoingBillPaymentReposito
                         payment.AccountNumber,
                         Type = type,
                         payment.Amount,
-                        Date = DateTime.UtcNow,
+                        Date = LocalClock.Now,
                         payment.Description,
                         payment.Reference
                     },
